@@ -1,0 +1,9 @@
+[package]
+name = "editor"
+version = "0.1.0"
+authors = ["Chris Briones <cbriones@snapchat.com>"]
+
+[dependencies]
+gapbuffer = "*"
+log = "*"
+env_logger = "*"
