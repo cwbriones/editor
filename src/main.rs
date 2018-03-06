@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::env;
 use std::io::prelude::*;
+use std::io::BufWriter;
 
 use client::{Client, Event, Key, KeyEvent};
 use gapbuffer::GapBuffer;
@@ -71,6 +72,11 @@ pub enum Action {
     Noop,
 }
 
+enum Mode {
+    Edit,
+    Save,
+}
+
 pub struct Editor {
     // Position within the buffer
     line: usize,
@@ -81,10 +87,14 @@ pub struct Editor {
     pos: usize,
     dirty: bool,
 
+    mode: Mode,
+
     total_lines: usize,
     width: usize,
     height: usize,
     buffer: GapBuffer<char>,
+
+    filename: String,
 }
 
 impl Editor {
@@ -99,26 +109,26 @@ impl Editor {
             width: 0,
             height: 0,
             dirty: true,
+            mode: Mode::Edit,
             buffer: GapBuffer::new(),
+            filename: String::new(),
         }
     }
 
-    fn clear(&mut self) {
-        self.line = 0;
-        self.ins = 0;
-        self.pos = 0;
-        self.total_lines = 1;
-    }
+    pub fn load(&mut self, filename: String) {
+        let mut init = String::new();
+        let mut file = File::open(&filename).expect("Could not open file");
+        file.read_to_string(&mut init).expect("Could not read file");
 
-    pub fn load(&mut self, file: String) {
-        self.clear();
-        self.buffer.reserve(file.len());
-        for (i, c) in file.chars().enumerate() {
+        self.buffer.reserve(init.len());
+        for (i, c) in init.chars().enumerate() {
             if c == '\n' {
                 self.total_lines += 1;
             }
             self.buffer.insert(i, c);
         }
+        println!("LOADED: {} ({} lines)", &filename, self.total_lines);
+        self.filename = filename;
     }
 
     fn last_newline(&self, scan: usize) -> usize {
@@ -144,15 +154,11 @@ impl Editor {
         self.buffer.len()
     }
 
-    fn get_insertion_point(&self) -> usize {
-        self.ins
-    }
-
     fn move_up(&mut self) {
         if self.line > 0 {
             // Move ins to the start of the previous line
             let start = self.last_newline(self.ins);
-            let start = self.last_newline(start - 1);
+            let start = self.last_newline(start);
             self.ins = if start == 0 { 0 } else { start + 1 };
             let end = self.next_newline(self.ins);
             let len = end - self.ins;
@@ -198,62 +204,20 @@ impl Editor {
 
     pub fn run(mut self, client: &mut Client) {
         let mut mapping = KeyMapping::new();
-
-        self.render(client);
         for ev in client.events() {
             match ev {
                 Event::Key(k) => {
-                    let action = mapping.get_action(k);
-                    debug!("Editing: {:?}", action);
-                    match action {
-                        Action::Insert(c) => {
-                            let ins = self.get_insertion_point();
-                            debug!("ins at {}", ins);
-                            self.buffer.insert(ins, c);
-                            self.ins += 1;
-                            if c == '\n' {
-                                self.pos = 0;
-                                self.line += 1;
-                                self.total_lines += 1;
-                            } else {
-                                self.pos += 1;
-                            }
+                    match self.mode {
+                        Mode::Edit => {
+                            let action = mapping.get_action(k);
+                            self.action_edit(action);
+                            self.render(client);
                         },
-                        Action::Delete => {
-                            if self.ins > 0 {
-                                self.ins -= 1;
-                            }
-                            match self.buffer.remove(self.ins) {
-                                Some('\n') => {
-                                    self.total_lines -= 1;
-                                    self.line -= 1;
-
-                                    let n = self.last_newline(self.ins);
-                                    self.pos = self.ins - n;
-                                },
-                                Some(_) if self.pos > 0 => {
-                                    self.pos -= 1;
-                                },
-                                _ => {},
-                            }
+                        Mode::Save => {
+                            let action = mapping.get_action(k);
+                            self.action_save(action);
+                            self.render_save(client);
                         },
-                        Action::CursorUp => self.move_up(),
-                        Action::CursorDown => self.move_down(),
-                        Action::CursorLeft => {
-                            if self.pos > 0 {
-                                self.pos -= 1;
-                                self.ins -= 1;
-                            }
-                        },
-                        Action::CursorRight => {
-                            let end = self.next_newline(self.ins);
-                            let remaining = end - self.ins;
-                            if remaining > 0 {
-                                self.pos += 1;
-                                self.ins += 1;
-                            }
-                        },
-                        _ => {},
                     }
                 },
                 Event::Resize(new_width, new_height) => {
@@ -262,7 +226,87 @@ impl Editor {
                 },
                 _ => {},
             }
-            self.render(client);
+        }
+    }
+
+    fn action_save(&mut self, action: Action) {
+        match action {
+            Action::Insert('\n') => {
+                // save
+                self.save();
+                self.mode = Mode::Edit;
+            },
+            Action::Insert(c) => {
+                self.filename.push(c);
+            },
+            Action::Delete => {
+                self.filename.pop();
+            },
+            _ => {},
+        }
+    }
+
+    fn save(&self) {
+        let file = File::create(&self.filename).unwrap();
+        let mut buf = String::new();
+        for &c in self.buffer.iter() {
+            buf.push(c);
+        }
+        BufWriter::new(file).write_all(buf.as_bytes()).unwrap();
+    }
+
+    fn action_edit(&mut self, action: Action) {
+        debug!("Editing: {:?}", action);
+        match action {
+            Action::Save => {
+                self.mode = Mode::Save;
+            },
+            Action::Insert(c) => {
+                self.buffer.insert(self.ins, c);
+                self.ins += 1;
+                if c == '\n' {
+                    self.pos = 0;
+                    self.line += 1;
+                    self.total_lines += 1;
+                } else {
+                    self.pos += 1;
+                }
+            },
+            Action::Delete => {
+                if self.ins > 0 {
+                    self.ins -= 1;
+                }
+                match self.buffer.remove(self.ins) {
+                    Some('\n') => {
+                        self.total_lines -= 1;
+                        self.line -= 1;
+
+                        let n = self.last_newline(self.ins);
+                        self.pos = self.ins - n;
+                    },
+                    Some(_) if self.pos > 0 => {
+                        self.pos -= 1;
+                    },
+                    _ => {},
+                }
+            },
+            Action::CursorUp => self.move_up(),
+            Action::CursorDown => self.move_down(),
+            Action::CursorLeft => {
+                if self.pos > 0 {
+                    self.pos -= 1;
+                    self.ins -= 1;
+                }
+            },
+            Action::CursorRight => {
+                let end = self.next_newline(self.ins);
+                let remaining = end - self.ins;
+                if remaining > 0 {
+                    self.pos += 1;
+                    self.ins += 1;
+                }
+            },
+            _ => {},
         }
     }
 
@@ -285,6 +329,13 @@ impl Editor {
         let cursor_y = self.line * CHEIGHT;
         client.rect(cursor_x, cursor_y, 1, CHEIGHT);
         self.render_debug(client);
+    }
+
+    pub fn render_save(&mut self, client: &mut Client) {
+        let line = self.max_window_lines() - 1;
+        client.rect_white(0, line * CHEIGHT, self.width, CHEIGHT);
+        let text = format!("Save to file: {}", self.filename);
+        client.text(0, line * CHEIGHT, &text);
     }
 
     fn render_debug(&mut self, client: &mut Client) {
@@ -341,15 +392,10 @@ fn main() {
     let mut args = env::args();
     let _app = args.next();
 
-    let mut init = String::new();
-    if let Some(filename) = args.next() {
-        let mut file = File::open(filename).expect("Could not open file");
-        file.read_to_string(&mut init).expect("Could not read file");
-    }
-
-    let mut client = Client::new("127.0.0.1:5005");
-
     let mut editor = Editor::new();
-    editor.load(init);
+    if let Some(filename) = args.next() {
+        editor.load(filename);
+    }
+    let mut client = Client::new("127.0.0.1:5005");
     editor.run(&mut client);
 }

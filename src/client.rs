@@ -32,6 +32,12 @@ impl Client {
         self.output.flush().unwrap();
     }
 
+    pub fn rect_white(&mut self, x: usize, y: usize, width: usize, height: usize) {
+        let com = format!("rect,{},{},{},{},#ffffff\n", x, y, width, height);
+        self.output.write(com.as_bytes()).unwrap();
+        self.output.flush().unwrap();
+    }
+
     pub fn clear(&mut self) {
         self.output.write(b"clear\n").unwrap();
         self.output.flush().unwrap();
